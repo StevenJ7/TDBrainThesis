@@ -1,0 +1,340 @@
+#%%
+import os
+import numpy as np
+import mne
+from nice.markers import PowerSpectralDensityEstimator
+from nice.markers import PowerSpectralDensitySummary
+from nice.markers import PowerSpectralDensity
+from nice.markers import PermutationEntropy
+from nice.markers import SymbolicMutualInformation
+from nice.markers import KolmogorovComplexity
+from scipy.stats import trim_mean
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from keras import Sequential
+from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense
+from keras.preprocessing.sequence import pad_sequences
+from keras.models import Sequential, Model
+from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
+from keras.utils import to_categorical
+from scipy.io import savemat
+from keras import utils as np_utils
+from keras.models import Sequential
+from keras.layers import Conv2D, Dropout, Flatten, Dense
+from arl_eegmodels.EEGModels import EEGNet
+from keras.callbacks import ModelCheckpoint
+from keras.callbacks import EarlyStopping
+from sklearn.ensemble import RandomForestClassifier
+from keras.callbacks import ModelCheckpoint
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, roc_curve, auc, roc_auc_score
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+import seaborn as sns
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report
+from sklearn.preprocessing import PolynomialFeatures, label_binarize
+from sklearn.feature_selection import SelectFromModel
+#%%
+
+processed_data_dir = 'processed_data'
+os.makedirs(processed_data_dir, exist_ok=True)
+
+def plot_feature_importances(importances, feature_names):
+    indices = np.argsort(importances)[::-1]
+    plt.figure(figsize=(10, 7))
+    plt.title("Feature Importances")
+    plt.bar(range(len(importances)), importances[indices], align="center")
+    plt.xticks(range(len(importances)), np.array(feature_names)[indices], rotation=90)
+    plt.xlim([-1, len(importances)])
+    plt.show()
+#%%
+def find_npy_files(root_directory):
+    """
+    Find all .npy files in subdirectories of the root directory.
+    
+    Args:
+    - root_directory: The root directory to start searching for .npy files.
+    
+    Returns:
+    - List of paths to .npy files found in subdirectories.
+    """
+    npy_files = []
+    for root, dirs, files in os.walk(root_directory):
+        for file in files:
+            if file.endswith(".npy"):
+                file_path = os.path.join(root, file)
+                npy_files.append(file_path)
+    return npy_files
+
+# Define the root directory
+root_directory = "E:/Thesis DSS/TD_BRAIN/npyfiles/indication"
+
+# Call the find_npy_files function with the root directory
+npy_files = find_npy_files(root_directory)
+
+import numpy as np
+def load_data_from_folder(folder_path):
+    """
+    Load data from subfolders within the given folder path.
+
+    Parameters:
+    - folder_path (str): Path to the folder containing subfolders of data.
+
+    Returns:
+    - data_dict (dict): A dictionary where keys are indication names and values are lists of loaded data.
+    """
+    data_dict = {}
+
+    # Get a list of all subfolders in the folder path
+    subfolders = [f for f in os.listdir(folder_path) if os.path.isdir(os.path.join(folder_path, f))]
+
+    for indication in subfolders:
+        indication_path = os.path.join(folder_path, indication)
+        data_list = []
+
+        # Load data from all npy files in the indication folder
+        for file_name in os.listdir(indication_path):
+            if file_name.endswith(".npy"):
+                file_path = os.path.join(indication_path, file_name)
+                data = np.load(file_path, allow_pickle=True)
+                data_list.append(data)
+
+        # Store the loaded data in the data dictionary
+        data_dict[indication] = data_list
+
+    return data_dict
+#%%
+def load_data(file_path):
+    # Replace this with the actual data loading logic
+    return np.load(file_path, allow_pickle=True)  # Assuming .npy files
+
+def load_data_from_specific_folders(folders):
+    data_dict = {"MDD_EC": [], "MDD_EO": [], "healthy_EC": [], "healthy_EO": []}
+
+    for folder in folders:
+        if "MDD_EC" in folder:
+            category = "MDD_EC"
+        elif "MDD_EO" in folder:
+            category = "MDD_EO"
+        elif "healthy_EC" in folder:
+            category = "healthy_EC"
+        elif "healthy_EO" in folder:
+            category = "healthy_EO"
+        else:
+            continue
+        
+        print(f"Checking folder: {folder}")  # Debug: print folder being checked
+        for root, _, files in os.walk(folder):
+            for filename in files:
+                if filename.endswith(".npy"):
+                    file_path = os.path.join(root, filename)
+                    print(f"Processing file: {file_path}")  # Debug: print file being processed
+                    data_dict[category].append(load_data(file_path))
+
+    return data_dict
+
+def label_files(data_dict):
+    labels = []
+    for indication, files in data_dict.items():
+        labels.extend([indication] * len(files))
+    return labels
+
+folders = [
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/closed/healthy_EC",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/closed/MDD_EC",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/open/healthy_EO",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/open/MDD_EO"
+]
+
+# Load data from the specified folders
+data_dict = load_data_from_specific_folders(folders)
+
+# Print the number of files in each category
+for category, files in data_dict.items():
+    print(f"Number of {category} files:", len(files))
+
+# Get labels for each file
+all_labels = label_files(data_dict)
+
+# Combine all data into a single list
+all_data = []
+for files in data_dict.values():
+    all_data.extend(files)
+#%%
+
+def process_data(data_list):
+    processed_data = []
+    for data in data_list:
+        print("Processing data...")
+        
+        # Create MNE objects
+        ch_types = ["eeg" for x in range(26)] + ["bio" for x in range(6)]
+        info_mne = mne.create_info(data["labels"].tolist(), sfreq=data["Fs"], ch_types=ch_types)
+        epochs = mne.EpochsArray(data["data"], info=info_mne)
+        
+        # Check if length along the third axis is less than 60000
+        if epochs.get_data().shape[2] < 60000:
+            # Pad the array to make its length along the third axis 60000
+            pad_width = ((0, 0), (0, 0), (0, 60000 - epochs.get_data().shape[2]))
+            padded_data = np.pad(epochs.get_data(), pad_width, mode='constant', constant_values=0)
+            epochs = mne.EpochsArray(padded_data, info=info_mne)
+        elif epochs.get_data().shape[2] > 60000:
+            # Trim the array to make its length along the third axis 60000
+            trimmed_data = epochs.get_data()[:, :, :60000]
+            epochs = mne.EpochsArray(trimmed_data, info=info_mne)
+        
+        epochs_data = epochs.get_data().astype(np.float32)
+        processed_data.append(mne.EpochsArray(epochs_data, info=info_mne))   # Append the processed epochs to the list
+
+    return processed_data
+
+# Process the data stored in all_data
+processed_all_data = process_data(all_data)
+#%%
+# Initialize lists to store processed data for MDD and healthy
+MDD_processed = []
+healthy_processed = []
+
+# Assign processed data to MDD_processed or healthy_processed based on the labels
+for label, data in zip(all_labels, processed_all_data):
+    if "MDD" in label:
+        MDD_processed.append(data)
+    elif "healthy" in label:
+        healthy_processed.append(data)
+#%%
+print(np.shape(MDD_processed))
+ #%%
+# Check the type of the processed data
+for data in processed_all_data:
+    print(all_labels)
+# %%
+def conc_data(data_list):
+    conc_data=data_list[0].get_data()
+    for i in range(1,len(data_list)):
+        conc_data=np.concatenate((conc_data, data_list[i].get_data()), axis=0)
+    print(np.shape(conc_data)) 
+    return conc_data
+
+#%%
+np.shape(healthy_processed)
+#%%
+X = processed_all_data
+#%%
+b = np.full((1,len(MDD_processed)), 1)
+c = np.full((1,len(healthy_processed)), 2)
+y = np.concatenate((b,c), axis=1)[0]
+print(np.shape(y))
+#%%
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=420)
+X_validate, X_test, y_validate, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=420)
+#%%
+type(processed_all_data[0])
+#%%
+y_train = np_utils.to_categorical(y_train)
+y_validate = np_utils.to_categorical(y_validate)
+y_test = np_utils.to_categorical(y=y_test)
+print('y_train shape:', y_train.shape)
+
+kernels, channels, samples = 1, 32, 60000
+
+X_train = X_train.reshape(X_train.shape[0], channels, samples, kernels)
+X_validate = X_validate.reshape(X_validate.shape[0], channels, samples, kernels)
+X_test = X_test.reshape(X_test.shape[0], channels, samples, kernels)
+print('X_train shape:', X_train.shape)
+#%%
+model = EEGNet(nb_classes = 3, Chans = channels, Samples = samples, 
+               dropoutRate = 0.5, kernLength = 32, F1 = 8, D = 2, F2 = 16, 
+               dropoutType = 'Dropout')
+
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, verbose=1, restore_best_weights=True)
+
+# compile the model and set the optimizers
+model.compile(loss='categorical_crossentropy', optimizer='adam', metrics = ['accuracy'])
+
+# count number of parameters in the model
+numParams  = model.count_params()
+
+checkpointer = ModelCheckpoint(filepath='E:\Thesis DSS\TD_BRAIN\checkpoint', verbose=1, save_best_only=True)
+
+fittedModel = model.fit(X_train, y_train, batch_size = 32, epochs = 100, 
+                        verbose = 2, validation_data=(X_validate, y_validate),
+                        callbacks=[early_stopping, checkpointer])
+#%%
+model.load_weights('E:\Thesis DSS\TD_BRAIN\checkpoint')
+probs = model.predict(X_test)
+preds = probs.argmax(axis=-1)  
+acc = np.mean(preds==y_test.argmax(axis=-1))
+print("Classification accuracy: %f"%(acc))
+
+model.load_weights('E:\Thesis DSS\TD_BRAIN\checkpoint')
+probs = model.predict(X_test)
+preds = probs.argmax(axis=-1)  
+#%%
+# Calculate F1 score
+f1 = f1_score(y_test.argmax(axis=-1), preds, average='weighted')
+
+print("F1 score: %f" % f1)
+
+
+# Plot training and validation loss
+plt.plot(fittedModel.history['loss'], label='Training Loss')
+plt.plot(fittedModel.history['val_loss'], label='Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss')
+plt.legend()
+plt.show()
+#%%
+from sklearn.metrics import classification_report
+print(classification_report(y_test.argmax(axis=-1), preds))
+
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+cm = confusion_matrix(y_test.argmax(axis=-1), preds)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.show()
+#%%
+n_classes = y_test.shape[1]
+fpr = dict()
+tpr = dict()
+roc_auc = dict()
+
+for i in range(n_classes):
+    fpr[i], tpr[i], _ = roc_curve(y_test[:, i], probs[:, i])
+    roc_auc[i] = auc(fpr[i], tpr[i])
+
+# Compute micro-average ROC curve and ROC area
+fpr["micro"], tpr["micro"], _ = roc_curve(y_test.ravel(), probs.ravel())
+roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+
+# Plot ROC curves
+plt.figure()
+colors = ['aqua', 'darkorange', 'cornflowerblue']
+for i, color in zip(range(n_classes), colors):
+    plt.plot(fpr[i], tpr[i], color=color, lw=2, label='ROC curve of class {0} (area = {1:0.2f})'
+                                                      ''.format(i, roc_auc[i]))
+plt.plot([0, 1], [0, 1], 'k--', lw=2)
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic (ROC) Curve')
+plt.legend(loc="lower right")
+plt.show()
+
+# Print AUC for each class
+for i in range(n_classes):
+    print(f'AUC for class {i}: {roc_auc[i]:.2f}')
+
+#%%
+import sys
+print(sys.maxsize)
+# %%

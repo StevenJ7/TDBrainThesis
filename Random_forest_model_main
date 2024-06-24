@@ -1,0 +1,589 @@
+#%%
+import os
+import numpy as np
+import mne
+import pandas as pd
+from nice import Markers
+from nice.markers import PowerSpectralDensityEstimator
+from nice.markers import PowerSpectralDensitySummary
+from nice.markers import PowerSpectralDensity
+from nice.markers import PermutationEntropy
+from nice.markers import SymbolicMutualInformation
+from nice.markers import KolmogorovComplexity
+from scipy.stats import trim_mean
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from keras import Sequential
+from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense
+from keras.preprocessing.sequence import pad_sequences
+from keras.models import Sequential
+from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
+from keras.utils import to_categorical
+from scipy.io import savemat
+from keras import utils as np_utils
+from keras.models import Sequential
+from keras.layers import Conv2D, Dropout, Flatten, Dense
+from arl_eegmodels.EEGModels import EEGNet
+from keras.callbacks import ModelCheckpoint
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+import seaborn as sns
+from sklearn.model_selection import GridSearchCV, cross_val_score, StratifiedKFold
+from sklearn.metrics import classification_report
+
+def plot_feature_importances(importances, feature_names):
+    indices = np.argsort(importances)[::-1]
+    plt.figure(figsize=(10, 7))
+    plt.title("Feature Importances")
+    plt.bar(range(len(importances)), importances[indices], align="center")
+    plt.xticks(range(len(importances)), np.array(feature_names)[indices], rotation=90)
+    plt.xlim([-1, len(importances)])
+    plt.show()
+#%%
+def find_npy_files(root_directory):
+    """
+    Find all .npy files in subdirectories of the root directory.
+    
+    Args:
+    - root_directory: The root directory to start searching for .npy files.
+    
+    Returns:
+    - List of paths to .npy files found in subdirectories.
+    """
+    npy_files = []
+    for root, dirs, files in os.walk(root_directory):
+        for file in files:
+            if file.endswith(".npy"):
+                file_path = os.path.join(root, file)
+                npy_files.append(file_path)
+    return npy_files
+
+# Define the root directory
+root_directory = "E:/Thesis DSS/TD_BRAIN/npyfiles/indication"
+
+# Call the find_npy_files function with the root directory
+npy_files = find_npy_files(root_directory)
+
+import numpy as np
+def load_data_from_folder(folder_path):
+    """
+    Load data from subfolders within the given folder path.
+
+    Parameters:
+    - folder_path (str): Path to the folder containing subfolders of data.
+
+    Returns:
+    - data_dict (dict): A dictionary where keys are indication names and values are lists of loaded data.
+    """
+    data_dict = {}
+
+    # Get a list of all subfolders in the folder path
+    subfolders = [f for f in os.listdir(folder_path) if os.path.isdir(os.path.join(folder_path, f))]
+
+    for indication in subfolders:
+        indication_path = os.path.join(folder_path, indication)
+        data_list = []
+
+        # Load data from all npy files in the indication folder
+        for file_name in os.listdir(indication_path):
+            if file_name.endswith(".npy"):
+                file_path = os.path.join(indication_path, file_name)
+                data = np.load(file_path, allow_pickle=True)
+                data_list.append(data)
+
+        # Store the loaded data in the data dictionary
+        data_dict[indication] = data_list
+
+    return data_dict
+#%%
+def load_data(file_path):
+    # Replace this with the actual data loading logic
+    return np.load(file_path, allow_pickle=True)  # Assuming .npy files
+
+def load_data_from_specific_folders(folders):
+    data_dict = {"MDD_EC": [], "MDD_EO": [], "healthy_EC": [], "healthy_EO": []}
+
+    for folder in folders:
+        if "MDD_EC" in folder:
+            category = "MDD_EC"
+        elif "MDD_EO" in folder:
+            category = "MDD_EO"
+        elif "healthy_EC" in folder:
+            category = "healthy_EC"
+        elif "healthy_EO" in folder:
+            category = "healthy_EO"
+        else:
+            continue
+        
+        print(f"Checking folder: {folder}")  # Debug: print folder being checked
+        for root, _, files in os.walk(folder):
+            for filename in files:
+                if filename.endswith(".npy"):
+                    file_path = os.path.join(root, filename)
+                    print(f"Processing file: {file_path}")  # Debug: print file being processed
+                    data_dict[category].append(load_data(file_path))
+
+    return data_dict
+
+def label_files(data_dict):
+    labels = []
+    for indication, files in data_dict.items():
+        labels.extend([indication] * len(files))
+    return labels
+
+folders = [
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/closed/healthy_EC",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/closed/MDD_EC",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/open/healthy_EO",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/open/MDD_EO"
+]
+
+# Load data from the specified folders
+data_dict = load_data_from_specific_folders(folders)
+
+# Print the number of files in each category
+for category, files in data_dict.items():
+    print(f"Number of {category} files:", len(files))
+
+# Get labels for each file
+all_labels = label_files(data_dict)
+
+# Combine all data into a single list
+all_data = []
+for files in data_dict.values():
+    all_data.extend(files)
+#%%
+
+def process_data(data_list):
+    processed_data = []
+    for data in data_list:
+        print("Processing data...")
+        
+        # Create MNE objects
+        ch_types = ["eeg" for x in range(26)] + ["bio" for x in range(6)]
+        info_mne = mne.create_info(data["labels"].tolist(), sfreq=data["Fs"], ch_types=ch_types)
+        epochs = mne.EpochsArray(data["data"], info=info_mne)
+        
+        # Check if length along the third axis is less than 60000
+        if epochs.get_data().shape[2] < 60000:
+            # Pad the array to make its length along the third axis 60000
+            pad_width = ((0, 0), (0, 0), (0, 60000 - epochs.get_data().shape[2]))
+            padded_data = np.pad(epochs.get_data(), pad_width, mode='constant', constant_values=0)
+            epochs = mne.EpochsArray(padded_data, info=info_mne)
+        elif epochs.get_data().shape[2] > 60000:
+            # Trim the array to make its length along the third axis 60000
+            trimmed_data = epochs.get_data()[:, :, :60000]
+            epochs = mne.EpochsArray(trimmed_data, info=info_mne)
+        
+        processed_data.append(epochs)  # Append the processed epochs to the list
+
+    return processed_data
+
+# Process the data stored in all_data
+processed_all_data = process_data(all_data)
+#%%
+
+# Check the type of the processed data
+for data in processed_all_data:
+    print(all_labels)
+#%%
+# Initialize lists to store the data from "closed" and "open" folders
+data_EC = []
+data_EO = []
+
+
+def process_folder(folder_list, data_list):
+    for folder_path in folder_list:
+        for filename in os.listdir(folder_path):
+            if filename.endswith(".npy"):  # Check if the file is a numpy file
+                file_path = os.path.join(folder_path, filename)
+                print("Processing file:", file_path)  # Print the file being processed
+                
+                # Load the numpy file and create MNE objects
+                array = np.load(file_path, allow_pickle=True)
+                ch_types = ["eeg" for x in range(26)]+["bio" for x in range(6)]
+                info_mne = mne.create_info(array["labels"].tolist(), sfreq=array["Fs"], ch_types=ch_types)
+                data = mne.EpochsArray(array["data"], info=info_mne)
+                
+                # Check if length along the third axis is less than 60000
+                if data.get_data().shape[2] < 60000:
+                    # Pad the array to make its length along the third axis 60000
+                    pad_width = ((0, 0), (0, 0), (0, 60000 - data.get_data().shape[2]))
+                    padded_data = np.pad(data.get_data(), pad_width, mode='constant', constant_values=0)
+                    data = mne.EpochsArray(padded_data, info=info_mne)
+                elif data.get_data().shape[2] > 60000:
+                    # Trim the array to make its length along the third axis 60000
+                    trimmed_data = data.get_data()[:, :, :60000]
+                    data = mne.EpochsArray(trimmed_data, info=info_mne)
+                
+                # Append the data to the list
+                data_list.append(data) 
+
+# Define the root directories for "closed" and "open"
+closed_root_directory = "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/closed"
+open_root_directory = "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/open"
+epochs_all_data = process_folder
+
+# Function to iterate over subdirectories and process files
+def process_root_directory(root_directory, data_list_EC, data_list_EO):
+    for folder in os.listdir(root_directory):
+        subfolder_path = os.path.join(root_directory, folder)
+        if os.path.isdir(subfolder_path):
+            # Check if the subfolder name contains "_EC" or "_EO"
+            if "_EC" in folder:
+                process_folder([subfolder_path], data_list_EC)
+            elif "_EO" in folder:
+                process_folder([subfolder_path], data_list_EO)
+
+# Process the "closed" root directory
+process_root_directory(closed_root_directory, data_EC, data_EO)
+
+# Process the "open" root directory
+process_root_directory(open_root_directory, data_EC, data_EO)
+
+# Print the number of processed files for verification
+print(f"Number of processed files in data_EC: {len(data_EC)}")
+print(f"Number of processed files in data_EO: {len(data_EO)}")
+
+# Check if any data was loaded
+if len(data_EC) > 0:
+    print("Data EC loaded.")
+else:
+    print("No EC data found.")
+
+if len(data_EO) > 0:
+    print("Data EO loaded.")
+else:
+    print("No EO data found.")
+#%%
+def trim_mean80(a, axis=0):
+    return trim_mean(a, proportiontocut=.1, axis=axis)
+
+def entropy(a, axis=0):  # noqa
+    return -np.nansum(a * np.log(a), axis=axis) / np.log(a.shape[axis])
+
+def all_markers(epochs, tmin, tmax, target="epochs"):
+        """
+        Computes all ther markers for given epochs.
+        epochs: the epochs from which to compute the markers
+        tmin: min time for computing markers
+        tmax: max time to compute markers
+        target: reduction target, epochs or topography
+        """
+        descriptors = {}
+        markers_names = []
+
+        markers = [
+                 # Spectral Bands
+                 ["delta", 1.0,   4.0, [True, False]],  #PowerSpectralDensity
+                 ["theta", 4.0,   8.0, [True, False]],  #PowerSpectralDensity
+                 ["alpha", 8.0,  13.0, [True, False]],  #PowerSpectralDensity
+                 ["beta",  13.0, 30.0, [True, False]],  #PowerSpectralDensity
+                 ["gamma", 30.0, 45.0, [True, False]],  #PowerSpectralDensity
+
+                 # Spectral Entropy
+                #  ["se",    1.0,  45.0, [False]],        #PowerSpectralDensity
+
+                 # Spectral Summary
+                #  ["msf",   1.0,  45.0, [0.5]],          #PowerSpectralDensitySummary
+                #  ["sef90", 1.0,  45.0, [0.9]],          #PowerSpectralDensitySummary
+                #  ["sef95", 1.0,  45.0, [0.95]],         #PowerSpectralDensitySummary
+
+                 # Information Theory
+                #  ["perm",  "-",  "-", [1,2,4,8]],       #PermutationEntropy
+                #  ["wSMI",  "-",  "-", [1,2,4,8]],       #SymbolicMutualInformation
+                #  ["kolmo", "-",  "-", ["-"]] ]          #KolmogorovComplexity
+        ]
+        psds_params = dict(n_fft=4096, n_overlap=100, n_jobs='auto', nperseg=128)
+
+        base_psd = PowerSpectralDensityEstimator(psd_method='welch',
+                                                 tmin=tmin, tmax=tmax,
+                                                 fmin=1., fmax=45.,
+                                                 psd_params=psds_params, comment='default')
+
+        reduction_func= [{'axis': 'channels', 'function': np.mean},
+                         {'axis': 'epochs', 'function': trim_mean80}]
+
+        for marker in markers:
+            for option in marker[3]:
+
+                if type(option)==bool:
+                  name = marker[0]+"_norm" if option else marker[0]
+
+                  if name == "se":
+                    reduction_func.append({'axis': 'frequency', 'function': entropy})
+                  else:
+                    reduction_func.append({'axis': 'frequency', 'function': np.sum})
+
+                  marker_data = PowerSpectralDensity(estimator=base_psd,
+                                                   fmin=marker[1], fmax=marker[2],
+                                                   normalize=option, comment=name)
+
+                elif type(option)==float:
+                  name = marker[0]
+
+                  reduction_func.append({'axis': 'frequency', 'function': entropy})
+
+                  marker_data = PowerSpectralDensitySummary(estimator=base_psd,
+                                                          fmin=marker[1], fmax=marker[2],
+                                                          percentile=option, comment=name)
+                elif marker[0]=="perm":
+                  name = marker[0]+str(option)
+
+                  marker_data = PermutationEntropy(tmin=tmin, tmax=tmax,
+                                                 kernel=3, tau=option, comment=name)
+
+                elif marker[0]=="wSMI":
+                  name = marker[0]+str(option)
+
+                  reduction_func.append({'axis': 'channels_y', 'function': np.median})
+
+                  marker_data = SymbolicMutualInformation(tmin=tmin, tmax=tmax,
+                                                        kernel=3, tau=option,
+                                                        backend="python", method_params=None,
+                                                        method='weighted', comment=name)
+                elif marker[0]=="kolmo":
+                  name = marker[0]
+
+                  marker_data = KolmogorovComplexity(tmin=tmin, tmax=tmax,
+                                                   backend='python', comment=name)
+
+                else:
+                    print("Error")
+                    break
+
+                print(name)
+                markers_names.append(name)
+
+                marker_data.fit(epochs)
+                #marker_reduced = marker_data._reduce_to(reduction_func, target=target, picks=None)
+                descriptors[name] = marker_data._prepare_data(target=None, picks=None).sum(axis=2)
+
+        return descriptors, markers_names
+
+channel_names = processed_all_data[0].info['ch_names']
+
+
+
+for i in range(min(26, len(channel_names))):
+    print(channel_names[i])
+
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+picks = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'FC3', 'FCz', 'FC4', 'T7', 'C3', 'Cz', 'C4', 'T8', 'CP3', 'CPz', 'CP4', 'P7', 'P3', 'Pz', 'P4', 'P8', 'O1', 'Oz', 'O2',
+          'artifacts', 'VEOG', 'HEOG', 'Erbs','OrbOcc','Mass']
+
+
+descriptors, markers_names = all_markers(processed_all_data[0], tmin= 0, tmax= 120*500, target="topography")
+    
+    # Use descriptors and markers_names as needed
+print("Descriptors:", descriptors)
+print("Marker names:", markers_names)
+
+# Concatenate the data and labels
+#all_data = data_EC + data_EO
+#all_labels = labels_EC + labels_EO
+#%%
+
+def extract_features(epochs_array):
+    all_descriptors = []
+    all_markers_names = []
+    
+    for sample in epochs_array:
+        descriptors, markers_names = all_markers(sample, tmin=0, tmax=120*500, target="topography")
+        all_descriptors.append(descriptors)
+        all_markers_names.append(markers_names)
+    
+    return all_descriptors, all_markers_names
+
+# Function to flatten the descriptors dictionary
+def flatten_descriptors(descriptors):
+    flat_list = []
+    for descriptor in descriptors:
+        for key in descriptor:
+            flat_list.extend(descriptor[key].flatten())
+    return flat_list
+#%%
+
+#%%
+# Define a function to remove the "_EC" and "_EO" suffixes
+def remove_suffix(label):
+    return label.split("_")[0]
+unique_labels = np.unique(all_labels) 
+all_labels_no_suffix = [remove_suffix(label) for label in all_labels]
+unique_labels_nosuffix = np.unique(all_labels_no_suffix)
+print(unique_labels_nosuffix)
+print(unique_labels)
+
+#%%
+#%% ####################################################################################################
+
+# Extract features for each epochs array
+def extract_psd_features(epochs):
+    descriptors, markers_names = all_markers(epochs, tmin=0, tmax=120*500, target="psd")  # Adjust target to PSD
+    return descriptors, markers_names
+
+# Function to extract features (only PSD) from epochs_array
+def extract_features(epochs_array):
+    all_psd_descriptors = []
+    all_psd_markers_names = []
+    
+    for epochs in epochs_array:
+        descriptors, markers_names = extract_psd_features(epochs)
+        all_psd_descriptors.append(descriptors)
+        all_psd_markers_names.append(markers_names)
+    
+    return all_psd_descriptors, all_psd_markers_names
+
+# Function to flatten the descriptors dictionary (adapted for PSD features)
+def flatten_descriptors(descriptors):
+    flat_list = []
+    for descriptor in descriptors:
+        for key in descriptor:
+            if 'psd' in key:
+                flat_list.extend(descriptor[key].flatten())
+    return flat_list
+
+# Extract features for each epochs array
+features = []
+
+for epochs_array in processed_all_data:
+    psd_descriptors, psd_marker_names = extract_features([epochs_array])
+    flat_features = flatten_descriptors(psd_descriptors)
+    features.append(flat_features)
+#%%
+df_features = pd.DataFrame(features)
+#%%
+print(df_features)
+#%%
+def flatten_descriptors_to_df(descriptors, feature_names):
+    # Create a list to hold each column's data
+    data = {}
+    
+    for feature_name in feature_names:
+        # Assuming each descriptor is a 2D array with shape (n_samples, n_channels)
+        descriptor = descriptors[feature_name]
+        for i in range(descriptor.shape[1]):  # Iterate over channels
+            col_name = f"{feature_name}_ch{i}"
+            data[col_name] = descriptor[:, i]
+    
+    # Construct the DataFrame in a single operation
+    df = pd.DataFrame(data)
+    return df
+
+# Extract features
+descriptors, feature_names = extract_psd_features(processed_all_data[0], tmin=0, tmax=120*500)
+
+#%%
+# Convert descriptors to DataFrame
+df_psd_features = flatten_descriptors_to_df(descriptors, feature_names)
+print(df_psd_features)
+#%% ########################################################################################
+features = []
+
+for epochs_array in processed_all_data:
+    sample_features, sample_marker_names = extract_features([epochs_array])
+    flat_features = flatten_descriptors(sample_features)
+    features.append(flat_features)
+
+#%%
+# Create a DataFrame for the features
+df_features = pd.DataFrame(features)
+print(df_features)
+
+#%%
+# Split data into training and testing sets
+# Split data into training, validation, and testing sets
+X_train_val, X_test, y_train_val, y_test = train_test_split(df_features, all_labels_no_suffix, test_size=0.2, random_state=42, stratify=all_labels)
+X_train, X_val, y_train, y_val = train_test_split(X_train_val, y_train_val, test_size=0.5, random_state=42, stratify=y_train_val)  # 0.25 * 0.8 = 0.2
+
+print(np.shape(X_train))
+print(np.shape(y_train))
+
+#%%
+# Initialize the Random Forest model with best parameters
+best_params = {
+    'bootstrap': False,
+    'max_depth': 10,
+    'max_features': 'log2',
+    'min_samples_leaf': 2,
+    'min_samples_split': 2,
+    'n_estimators': 100
+}
+
+# Cross-validation
+rf_classifier = RandomForestClassifier(**best_params)
+cv = StratifiedKFold(n_splits=5)
+cv_scores = cross_val_score(rf_classifier, X_train, y_train, cv=cv, scoring='accuracy')
+print(f"Cross-validation accuracy scores: {cv_scores}")
+print(f"Mean cross-validation accuracy: {np.mean(cv_scores)}")
+
+# Train the model on the entire training set
+rf_classifier.fit(X_train, y_train)
+
+# Validate the model
+val_predictions = rf_classifier.predict(X_val)
+print("Validation Report:")
+print(classification_report(y_val, val_predictions))
+
+# Final evaluation on the test set
+rf_classifier.fit(X_train_val, y_train_val)
+test_predictions = rf_classifier.predict(X_test)
+print("Test Report:")
+print(classification_report(y_test, test_predictions))
+#%%
+# Calculate accuracy and F1 scores
+accuracy = accuracy_score(y_test, test_predictions)
+f1_each = f1_score(y_test, test_predictions, average=None, labels=unique_labels_nosuffix)
+f1_macro = f1_score(y_test, test_predictions, average='macro')
+
+print("Accuracy:", accuracy)
+for label, score in zip(unique_labels_nosuffix, f1_each):
+    print(f"F1 Score for {label}:", score)
+print("F1 Score (Macro) for all labels:", f1_macro)
+
+# Compute confusion matrix
+conf_matrix = confusion_matrix(y_test, test_predictions, labels=unique_labels_nosuffix)
+print("Confusion Matrix:\n", conf_matrix)
+
+# Plot confusion matrix
+plt.figure(figsize=(10, 8))
+sns.heatmap(conf_matrix, annot=True, fmt="d", cmap="Blues", xticklabels=unique_labels_nosuffix, yticklabels=unique_labels_nosuffix)
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.title("Confusion Matrix")
+plt.show()
+
+#%%
+feature_importances = rf_classifier.feature_importances_
+
+# Get the indices of the top 10 features
+indices = np.argsort(feature_importances)[-10:]
+
+# Print the feature names of the top 10 features
+print("Top 10 Features:")
+for index in indices:
+    print(f"Feature {index}: {df_features.columns[index]} with importance {feature_importances[index]}")
+
+# Plot the top 10 features
+plt.figure(figsize=(10, 6))
+plt.title("Top 10 Feature Importances")
+plt.barh(range(len(indices)), feature_importances[indices], align="center")
+plt.yticks(range(len(indices)), [df_features.columns[i] for i in indices])
+plt.xlabel("Feature Importance")
+plt.show()
+
+# Find and print the most important feature
+most_important_feature_index = np.argmax(feature_importances)
+most_important_feature_name = df_features.columns[most_important_feature_index]
+print(f"The most important feature is: Feature {most_important_feature_index}: {most_important_feature_name}")
+# %%
+print(np.shape(df_features))
+
+# %%

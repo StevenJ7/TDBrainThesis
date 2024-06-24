@@ -1,0 +1,509 @@
+#%%
+import os
+import numpy as np
+import mne
+import pandas as pd
+from nice.markers import PowerSpectralDensityEstimator
+from nice.markers import PowerSpectralDensitySummary
+from nice.markers import PowerSpectralDensity
+from nice.markers import PermutationEntropy
+from nice.markers import SymbolicMutualInformation
+from nice.markers import KolmogorovComplexity
+from scipy.stats import trim_mean
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from keras import Sequential
+from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense
+from keras.preprocessing.sequence import pad_sequences
+from keras.models import Sequential, Model
+from keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
+from keras.utils import to_categorical
+from scipy.io import savemat
+from keras import utils as np_utils
+from keras.models import Sequential
+from keras.layers import Conv2D, Dropout, Flatten, Dense
+from arl_eegmodels.EEGModels import EEGNet
+from keras.callbacks import ModelCheckpoint
+from keras.callbacks import EarlyStopping
+from sklearn.ensemble import RandomForestClassifier
+from keras.callbacks import ModelCheckpoint
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, roc_curve, auc, roc_auc_score
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+import seaborn as sns
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report
+from sklearn.preprocessing import PolynomialFeatures, label_binarize
+from sklearn.feature_selection import SelectFromModel
+
+processed_data_dir = 'processed_data'
+os.makedirs(processed_data_dir, exist_ok=True)
+
+def plot_feature_importances(importances, feature_names):
+    indices = np.argsort(importances)[::-1]
+    plt.figure(figsize=(10, 7))
+    plt.title("Feature Importances")
+    plt.bar(range(len(importances)), importances[indices], align="center")
+    plt.xticks(range(len(importances)), np.array(feature_names)[indices], rotation=90)
+    plt.xlim([-1, len(importances)])
+    plt.show()
+#%%
+def find_npy_files(root_directory):
+    """
+    Find all .npy files in subdirectories of the root directory.
+    
+    Args:
+    - root_directory: The root directory to start searching for .npy files.
+    
+    Returns:
+    - List of paths to .npy files found in subdirectories.
+    """
+    npy_files = []
+    for root, dirs, files in os.walk(root_directory):
+        for file in files:
+            if file.endswith(".npy"):
+                file_path = os.path.join(root, file)
+                npy_files.append(file_path)
+    return npy_files
+
+# Define the root directory
+root_directory = "E:/Thesis DSS/TD_BRAIN/npyfiles/indication"
+
+# Call the find_npy_files function with the root directory
+npy_files = find_npy_files(root_directory)
+
+import numpy as np
+def load_data_from_folder(folder_path):
+    """
+    Load data from subfolders within the given folder path.
+
+    Parameters:
+    - folder_path (str): Path to the folder containing subfolders of data.
+
+    Returns:
+    - data_dict (dict): A dictionary where keys are indication names and values are lists of loaded data.
+    """
+    data_dict = {}
+
+    # Get a list of all subfolders in the folder path
+    subfolders = [f for f in os.listdir(folder_path) if os.path.isdir(os.path.join(folder_path, f))]
+
+    for indication in subfolders:
+        indication_path = os.path.join(folder_path, indication)
+        data_list = []
+
+        # Load data from all npy files in the indication folder
+        for file_name in os.listdir(indication_path):
+            if file_name.endswith(".npy"):
+                file_path = os.path.join(indication_path, file_name)
+                data = np.load(file_path, allow_pickle=True)
+                data_list.append(data)
+
+        # Store the loaded data in the data dictionary
+        data_dict[indication] = data_list
+
+    return data_dict
+#%%
+def load_data(file_path):
+    # Replace this with the actual data loading logic
+    return np.load(file_path, allow_pickle=True)  # Assuming .npy files
+
+def load_data_from_specific_folders(folders):
+    data_dict = {"MDD_EC": [], "MDD_EO": [], "healthy_EC": [], "healthy_EO": []}
+
+    for folder in folders:
+        if "MDD_EC" in folder:
+            category = "MDD_EC"
+        elif "MDD_EO" in folder:
+            category = "MDD_EO"
+        elif "healthy_EC" in folder:
+            category = "healthy_EC"
+        elif "healthy_EO" in folder:
+            category = "healthy_EO"
+        else:
+            continue
+        
+         # Debug: print folder being checked
+        for root, _, files in os.walk(folder):
+            for filename in files:
+                if filename.endswith(".npy"):
+                    file_path = os.path.join(root, filename)
+                    print(f"Processing file: {file_path}")  # Debug: print file being processed
+                    data_dict[category].append(load_data(file_path))
+
+    return data_dict
+
+def label_files(data_dict):
+    labels = []
+    for indication, files in data_dict.items():
+        labels.extend([indication] * len(files))
+    return labels
+
+folders = [
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/closed/healthy_EC",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/closed/MDD_EC",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/open/healthy_EO",
+    "E:/Thesis DSS/TD_BRAIN/npyfiles/indication/open/MDD_EO"
+]
+
+# Load data from the specified folders
+data_dict = load_data_from_specific_folders(folders)
+
+# Print the number of files in each category
+for category, files in data_dict.items():
+    print(f"Number of {category} files:", len(files))
+
+# Get labels for each file
+all_labels = label_files(data_dict)
+
+# Combine all data into a single list
+all_data = []
+for files in data_dict.values():
+    all_data.extend(files)
+#%%
+
+def process_data(data_list):
+    processed_data = []
+    for data in data_list:
+        
+        # Create MNE objects
+        ch_types = ["eeg" for x in range(26)] + ["bio" for x in range(6)]
+        info_mne = mne.create_info(data["labels"].tolist(), sfreq=data["Fs"], ch_types=ch_types)
+        epochs = mne.EpochsArray(data["data"], info=info_mne)
+        
+        # Check if length along the third axis is less than 60000
+        if epochs.get_data().shape[2] < 60000:
+            # Pad the array to make its length along the third axis 60000
+            pad_width = ((0, 0), (0, 0), (0, 60000 - epochs.get_data().shape[2]))
+            padded_data = np.pad(epochs.get_data(), pad_width, mode='constant', constant_values=0)
+            epochs = mne.EpochsArray(padded_data, info=info_mne)
+        elif epochs.get_data().shape[2] > 60000:
+            # Trim the array to make its length along the third axis 60000
+            trimmed_data = epochs.get_data()[:, :, :60000]
+            epochs = mne.EpochsArray(trimmed_data, info=info_mne)
+        
+        epochs_data = epochs.get_data().astype(np.float32)
+        processed_data.append(mne.EpochsArray(epochs_data, info=info_mne))   # Append the processed epochs to the list
+
+    return processed_data
+
+# Process the data stored in all_data
+processed_all_data = process_data(all_data)
+
+#%%
+del data_dict
+del npy_files
+del all_data
+#%%
+# Initialize lists to store processed data for MDD and healthy
+MDD_processed = []
+healthy_processed = []
+
+# Assign processed data to MDD_processed or healthy_processed based on the labels
+for label, data in zip(all_labels, processed_all_data):
+    if "MDD" in label:
+        MDD_processed.append(data)
+    elif "healthy" in label:
+        healthy_processed.append(data)
+
+# %%
+def conc_data(data_list):
+    conc_data=data_list[0].get_data()
+    for i in range(1,len(data_list)):
+        conc_data=np.concatenate((conc_data, data_list[i].get_data()), axis=0)
+    print(np.shape(conc_data)) 
+    return conc_data
+
+#%%
+MDD_epoch = conc_data(MDD_processed)
+healthy_epoch = conc_data(healthy_processed)
+#%%
+X = np.concatenate((healthy_epoch, MDD_epoch), axis=0)
+b = np.full((1,len(healthy_epoch)), 1)
+c = np.full((1,len(MDD_epoch)), 2)
+y = np.concatenate((b,c), axis=1)[0]
+print(np.shape(y))
+
+#%%
+def trim_mean80(a, axis=0):
+    return trim_mean(a, proportiontocut=.1, axis=axis)
+
+def entropy(a, axis=0):  # noqa
+    return -np.nansum(a * np.log(a), axis=axis) / np.log(a.shape[axis])
+
+def all_markers(epochs, tmin, tmax, target="epochs"):
+        """
+        Computes all ther markers for given epochs.
+        epochs: the epochs from which to compute the markers
+        tmin: min time for computing markers
+        tmax: max time to compute markers
+        target: reduction target, epochs or topography
+        """
+        descriptors = {}
+        markers_names = []
+
+        markers = [
+                 # Spectral Bands
+                 ["delta", 1.0,   4.0, [True, False]],  #PowerSpectralDensity
+                 ["theta", 4.0,   8.0, [True, False]],  #PowerSpectralDensity
+                 ["alpha", 8.0,  13.0, [True, False]],  #PowerSpectralDensity
+                 ["beta",  13.0, 30.0, [True, False]],  #PowerSpectralDensity
+                 ["gamma", 30.0, 45.0, [True, False]],  #PowerSpectralDensity
+
+                 # Spectral Entropy
+                #  ["se",    1.0,  45.0, [False]],        #PowerSpectralDensity
+
+                 # Spectral Summary
+                #  ["msf",   1.0,  45.0, [0.5]],          #PowerSpectralDensitySummary
+                #  ["sef90", 1.0,  45.0, [0.9]],          #PowerSpectralDensitySummary
+                #  ["sef95", 1.0,  45.0, [0.95]],         #PowerSpectralDensitySummary
+
+                 # Information Theory
+                #  ["perm",  "-",  "-", [1,2,4,8]],       #PermutationEntropy
+                #  ["wSMI",  "-",  "-", [1,2,4,8]],       #SymbolicMutualInformation
+                #  ["kolmo", "-",  "-", ["-"]] ]          #KolmogorovComplexity
+        ]
+        psds_params = dict(n_fft=4096, n_overlap=100, n_jobs='auto', nperseg=128)
+
+        base_psd = PowerSpectralDensityEstimator(psd_method='welch',
+                                                 tmin=tmin, tmax=tmax,
+                                                 fmin=1., fmax=45.,
+                                                 psd_params=psds_params, comment='default')
+
+        reduction_func= [{'axis': 'channels', 'function': np.mean},
+                         {'axis': 'epochs', 'function': trim_mean80}]
+
+        for marker in markers:
+            for option in marker[3]:
+
+                if type(option)==bool:
+                  name = marker[0]+"_norm" if option else marker[0]
+
+                  if name == "se":
+                    reduction_func.append({'axis': 'frequency', 'function': entropy})
+                  else:
+                    reduction_func.append({'axis': 'frequency', 'function': np.sum})
+
+                  marker_data = PowerSpectralDensity(estimator=base_psd,
+                                                   fmin=marker[1], fmax=marker[2],
+                                                   normalize=option, comment=name)
+
+                elif type(option)==float:
+                  name = marker[0]
+
+                  reduction_func.append({'axis': 'frequency', 'function': entropy})
+
+                  marker_data = PowerSpectralDensitySummary(estimator=base_psd,
+                                                          fmin=marker[1], fmax=marker[2],
+                                                          percentile=option, comment=name)
+                elif marker[0]=="perm":
+                  name = marker[0]+str(option)
+
+                  marker_data = PermutationEntropy(tmin=tmin, tmax=tmax,
+                                                 kernel=3, tau=option, comment=name)
+
+                elif marker[0]=="wSMI":
+                  name = marker[0]+str(option)
+
+                  reduction_func.append({'axis': 'channels_y', 'function': np.median})
+
+                  marker_data = SymbolicMutualInformation(tmin=tmin, tmax=tmax,
+                                                        kernel=3, tau=option,
+                                                        backend="python", method_params=None,
+                                                        method='weighted', comment=name)
+                elif marker[0]=="kolmo":
+                  name = marker[0]
+
+                  marker_data = KolmogorovComplexity(tmin=tmin, tmax=tmax,
+                                                   backend='python', comment=name)
+
+                else:
+                    print("Error")
+                    break
+
+                print(name)
+                markers_names.append(name)
+
+                marker_data.fit(epochs)
+                #marker_reduced = marker_data._reduce_to(reduction_func, target=target, picks=None)
+                descriptors[name] = marker_data._prepare_data(target=None, picks=None).sum(axis=2)
+
+        return descriptors, markers_names
+
+#%%
+def extract_features(epochs_array):
+    all_descriptors = []
+    all_markers_names = []
+    
+    for sample in epochs_array:
+        descriptors, markers_names = all_markers(sample, tmin=0, tmax=120*500, target="topography")
+        all_descriptors.append(descriptors)
+        all_markers_names.append(markers_names)
+    
+    return all_descriptors, all_markers_names
+
+# Function to flatten the descriptors dictionary
+def flatten_descriptors(descriptors):
+    flat_list = []
+    for descriptor in descriptors:
+        for key in descriptor:
+            flat_list.extend(descriptor[key].flatten())
+    return flat_list
+
+#%%
+# Define a function to remove the "_EC" and "_EO" suffixes
+def remove_suffix(label):
+    return label.split("_")[0]
+unique_labels = np.unique(all_labels) 
+all_labels_no_suffix = [remove_suffix(label) for label in all_labels]
+unique_labels_nosuffix = np.unique(all_labels_no_suffix)
+print(unique_labels_nosuffix)
+print(unique_labels)
+
+
+
+def plot_training_history(history):
+    plt.figure(figsize=(12, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['accuracy'], label='Training Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+def plot_roc_curve(y_true, y_pred, n_classes):
+    y_true_bin = label_binarize(y_true, classes=range(n_classes))
+    y_pred_bin = label_binarize(y_pred, classes=range(n_classes))
+    
+    fpr = dict()
+    tpr = dict()
+    roc_auc = dict()
+    for i in range(n_classes):
+        fpr[i], tpr[i], _ = roc_curve(y_true_bin[:, i], y_pred_bin[:, i])
+        roc_auc[i] = auc(fpr[i], tpr[i])
+
+    plt.figure()
+    for i in range(n_classes):
+        plt.plot(fpr[i], tpr[i], label=f'Class {i} (AUC = {roc_auc[i]:.2f})')
+
+    plt.plot([0, 1], [0, 1], 'k--', label='Chance')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend(loc='lower right')
+    plt.show()
+#%%
+features = []
+
+for epochs_array in processed_all_data:
+    sample_features, sample_marker_names = extract_features([epochs_array])
+    flat_features = flatten_descriptors(sample_features)
+    features.append(flat_features)
+# Create a DataFrame for the features
+df_features = pd.DataFrame(features)
+
+#%%
+def main_pipeline():
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_validate, X_test, y_validate, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
+
+    y_train = to_categorical(y_train)
+    y_validate = to_categorical(y_validate)
+    y_test = to_categorical(y_test)
+
+    kernels, channels, samples = 1, 32, 60000
+
+    X_train = X_train.reshape(X_train.shape[0], channels, samples, kernels)
+    X_validate = X_validate.reshape(X_validate.shape[0], channels, samples, kernels)
+    X_test = X_test.reshape(X_test.shape[0], channels, samples, kernels)
+
+
+    # Update the samples variable to reflect the new shape
+    samples = X_train.shape[2]
+
+    model = EEGNet(nb_classes=3, Chans=channels, Samples=samples, dropoutRate=0.5, kernLength=32, F1=8, D=2, F2=16, dropoutType='Dropout')
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=10, verbose=1, restore_best_weights=True)
+
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+    checkpointer = ModelCheckpoint(filepath='E:/Thesis DSS/TD_BRAIN/checkpoint', verbose=1, save_best_only=True)
+
+    history = model.fit(X_train, y_train, batch_size=16, epochs=100, verbose=2, validation_data=(X_validate, y_validate), callbacks=[early_stopping, checkpointer])
+
+    # Plot training and validation loss/accuracy
+    plot_training_history(history)
+
+    # Feature extraction using EEGNet
+    train_features = extract_features(model, X_train)
+    test_features = extract_features(model, X_test)
+
+    # Generate feature names for the extracted features
+    original_feature_names = [f"feature_{i}" for i in range(train_features.shape[1])]
+
+    # Feature selection
+    selector_rf = RandomForestClassifier(n_estimators=100)
+    selector_rf.fit(train_features, y_train)
+
+    selector = SelectFromModel(selector_rf, prefit=True, max_features=500)  # Limit to top 500 features for example
+    train_features_selected = selector.transform(train_features)
+    test_features_selected = selector.transform(test_features)
+
+    # Update feature names based on selection
+    selected_feature_indices = selector.get_support(indices=True)
+    selected_feature_names = [original_feature_names[i] for i in selected_feature_indices]
+
+    # Add polynomial features to the selected features
+    poly = PolynomialFeatures(degree=1)
+    train_features_poly = poly.fit_transform(train_features_selected)
+    test_features_poly = poly.transform(test_features_selected)
+
+    # Get feature names for polynomial features
+    poly_feature_names = poly.get_feature_names_out(selected_feature_names)
+
+    # Train and evaluate Random Forest on reduced features
+    rf_classifier = RandomForestClassifier(n_estimators=100, max_depth=10, max_features='log2', bootstrap=False, min_samples_split=2, min_samples_leaf=2)
+    rf_classifier.fit(train_features_poly, y_train)
+
+    rf_predictions = rf_classifier.predict(test_features_poly)
+    print("Random Forest Classifier Report:")
+    print(classification_report(np.argmax(y_test, axis=1), np.argmax(rf_predictions, axis=1)))
+
+    # Generate and display the confusion matrix
+    conf_matrix = confusion_matrix(np.argmax(y_test, axis=1), np.argmax(rf_predictions, axis=1))
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.show()
+
+    # Plot ROC curve
+    plot_roc_curve(np.argmax(y_test, axis=1), np.argmax(rf_predictions, axis=1), n_classes=3)
+
+    # Extract and plot feature importances
+    feature_importances = rf_classifier.feature_importances_
+    plot_feature_importances(feature_importances, poly_feature_names)
+
+if __name__ == "__main__":
+    main_pipeline()
+# %%
